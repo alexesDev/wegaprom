@@ -1,0 +1,87 @@
+- hosts: all
+  become: true
+  gather_facts: False
+  vars:
+    main_domain: x.x.x.x
+  roles:
+    - role: geerlingguy.docker
+      docker_install_compose: false
+  tasks:
+  - name: Install pip
+    apt:
+      name: python3-pip
+      state: present
+
+  - name: Install pip docker
+    pip:
+      name: docker
+
+  - name: Create data dirs
+    file:
+      path: "{{ item }}"
+      state: directory
+      mode: 0777
+    with_items:
+      - /srv/wega-grafana
+      - /srv/wega-prometheus
+
+  - name: Copy prometheus config
+    copy:
+      src: prometheus.yml
+      dest: /srv/wega-prometheus/config.yml
+
+  - name: Create a network
+    docker_network:
+      name: wega
+
+  - name: Create a traefik container
+    docker_container:
+      name: wega-traefik
+      image: "traefik:v2.5.5"
+      restart_policy: always
+      command: --providers.docker --providers.docker.defaultrule=''
+      # --api.insecure=true
+      ports:
+        - "80:80"
+        # - "8080:8080"
+      networks:
+        - name: wega
+      volumes:
+        - "/var/run/docker.sock:/var/run/docker.sock"
+
+  - name: Create a grafana container
+    docker_container:
+      name: wega-grafana
+      image: "grafana/grafana-oss:8.3.2"
+      restart_policy: always
+      labels:
+        traefik.http.routers.wegagrafana.rule: "Host(`{{ main_domain }}`)"
+      networks:
+        - name: wega
+      volumes:
+        - "/srv/wega-grafana:/var/lib/grafana"
+
+  - name: Create a prometheus container
+    docker_container:
+      name: wega-prometheus
+      image: "prom/prometheus:v2.32.1"
+      restart_policy: always
+      command: --storage.tsdb.path=/prometheus/data --config.file=/prometheus/config.yml
+      networks:
+        - name: wega
+      ports: []
+      volumes:
+        - "/srv/wega-prometheus:/prometheus"
+
+  - name: Create a pushgateway container
+    docker_container:
+      name: wega-pushgateway
+      image: "prom/pushgateway:v1.4.2"
+      restart_policy: always
+      labels:
+        traefik.http.routers.wegapushgateway.rule: "Host(`{{ main_domain }}`) && PathPrefix(`/metrics`)"
+        traefik.http.routers.wegapushgateway.middlewares: auth
+        traefik.http.middlewares.auth.basicauth.users: "esp:$apr1$f7sH1kwW$Rcnia4iPQuVPduUglfECm."
+      ports: []
+      networks:
+        - name: wega
